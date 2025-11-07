@@ -8,29 +8,55 @@ const port = process.env.PORT || 3000;
 app.get('/', async (req, res) => {
   const keyword = req.query.q || 'digital planner';
   let browser;
-
   try {
     browser = await puppeteer.launch({
       args: chromium.args,
       executablePath: await chromium.executablePath(),
       headless: true
     });
-
     const page = await browser.newPage();
-    // Navigate to login page and wait for the email field
-    await page.goto('https://app.everbee.io/login', { waitUntil: 'domcontentloaded' });
-    await page.waitForSelector('#email', { timeout: 15000 });
 
-    await page.type('#email', process.env.EVERBEE_EMAIL || '');
-    await page.type('#password', process.env.EVERBEE_PASS || '');
+    // Try to use cookies from environment variable
+    const cookiesString = process.env.EVERBEE_COOKIES || process.env.EVERBEE_COOKIE || '';
+    if (cookiesString.trim()) {
+      try {
+        const cookies = [];
+        const lines = cookiesString.split(/\r?\n/);
+        for (const line of lines) {
+          if (!line || line.startsWith('#')) continue;
+          const parts = line.split('\t');
+          if (parts.length >= 7) {
+            cookies.push({
+              name: parts[5],
+              value: parts[6],
+              domain: parts[0],
+              path: parts[2],
+              httpOnly: false,
+              secure: parts[3].toUpperCase() === 'TRUE',
+            });
+          }
+        }
+        // Navigate to base domain before setting cookies
+        await page.goto('https://app.everbee.io', { waitUntil: 'networkidle2' });
+        await page.setCookie(...cookies);
+        await page.reload({ waitUntil: 'networkidle2' });
+      } catch (err) {
+        console.error('Failed to apply cookies:', err);
+      }
+    } else {
+      // Fallback login with email and password
+      await page.goto('https://app.everbee.io/login', { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#email', { timeout: 15000 });
+      await page.type('#email', process.env.EVERBEE_EMAIL || '');
+      await page.type('#password', process.env.EVERBEE_PASS || '');
+      await Promise.all([
+        page.click("button[type='submit']"),
+        page.waitForNavigation({ waitUntil: 'networkidle2' })
+      ]);
+    }
 
-    await page.click("button[type='submit']");
-
-    // Wait for navigation after login
-    await page.waitForNavigation({ timeout: 30000 });
-
-    // Go to research page
-    await page.goto('https://app.everbee.io/research', { waitUntil: 'domcontentloaded' });
+    // Navigate to research page after authentication
+    await page.goto('https://app.everbee.io/research', { waitUntil: 'networkidle2' });
     await page.waitForTimeout(5000);
 
     const result = await page.evaluate(() => {
@@ -38,20 +64,16 @@ app.get('/', async (req, res) => {
     });
 
     res.json({ keyword, result });
-  } catch (error) {
-    console.error('Everbee scraper error:', error);
-    res.status(500).json({ error: error.message || error.toString() });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.toString() });
   } finally {
     if (browser) {
-      try {
-        await browser.close();
-      } catch (err) {
-        console.error('Error closing browser:', err);
-      }
+      await browser.close();
     }
   }
 });
 
 app.listen(port, () => {
-  console.log('Everbee scraper live on port ' + port);
+  console.log('EVERBEE scraper live on port ' + port);
 });
