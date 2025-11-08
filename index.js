@@ -1,32 +1,34 @@
 const express = require('express');
 const axios = require('axios');
-const cheerio = require('cheerio');
 
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.get('/', async (req, res) => {
   const query = req.query.q || '';
-  const apiKey = process.env.ZENROWS_API_KEY;
-  const cookiesString = process.env.EVERBEE_COOKIES || process.env.EVERBEE_COOKIE || '';
+  const apikey = process.env.ZENROWS_API_KEY;
+  const cookiesString = process.env.EVERBEE_COOKIES || process.env.EVERBEE_COOKIE_KTE || '';
 
-  if (!apiKey) {
+  if (!apikey) {
     return res.status(500).json({ error: 'Missing ZENROWS_API_KEY' });
   }
 
   try {
     const params = {
-      apikey: apiKey,
+      apikey: apikey,
       url: 'https://app.everbee.io/research',
       js_render: 'true',
-      custom_headers: 'true'
+      custom_headers: 'true',
+      css_extractor: JSON.stringify({ results: 'h2, h3' }),
     };
 
     const headers = {};
+
+    // Build cookie header from Netscape cookie file string if provided
     if (cookiesString.trim()) {
       try {
-        const cookiePairs = [];
         const lines = cookiesString.split(/\r?\n/);
+        const cookiePairs = [];
         for (const line of lines) {
           if (!line || line.startsWith('#')) continue;
           const parts = line.split('\t');
@@ -37,24 +39,19 @@ app.get('/', async (req, res) => {
           }
         }
         if (cookiePairs.length > 0) {
-          headers.Cookie = cookiePairs.join('; ');
+          headers['Cookie'] = cookiePairs.join('; ');
         }
       } catch (err) {
-        console.error('Failed to parse EVERBEE_COOKIES:', err);
+        console.error('Error parsing cookies:', err);
       }
     }
 
-    const response = await axios.get('https://api.zenrows.com/v1/', {
-      params,
-      headers
-    });
+    const response = await axios.get('https://api.zenrows.com/v1/', { params, headers });
 
-    const html = response.data.html || '';
-    const $ = cheerio.load(html);
-    const results = [];
-    $('h2, h3').each((i, elem) => {
-      results.push($(elem).text().trim());
-    });
+    let results = response.data.results || [];
+    if (query) {
+      results = results.filter(item => item.toLowerCase().includes(query.toLowerCase()));
+    }
 
     return res.json({ query, results });
   } catch (err) {
@@ -64,5 +61,5 @@ app.get('/', async (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Everbee scraper live on port ${port}`);
+  console.log(`Server listening on port ${port}`);
 });
