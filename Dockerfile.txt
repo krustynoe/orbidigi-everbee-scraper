@@ -1,17 +1,7 @@
-FROM node:18
-
-# Crear directorio de trabajo
+FROM mcr.microsoft.com/playwright:v1.56.1-jammy
 WORKDIR /app
-
-# Copiar dependencias y código
-COPY package.json .
-COPY index.js .
-
-# Instalar dependencias
-RUN npm install
-
-# Exponer el puerto que usará Render
+COPY package.json ./
+RUN npm install --omit=dev
+COPY index.js ./
 EXPOSE 3000
-
-# Comando de arranque
-CMD ["node", "index.js"]
+CMD ["node","index.js"]
