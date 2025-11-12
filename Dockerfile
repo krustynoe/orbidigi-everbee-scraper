@@ -1,0 +1,13 @@
+FROM mcr.microsoft.com/playwright:v1.56.1-jammy
+
+WORKDIR /app
+
+
+RUN npm install --omit=dev
+
+COPY index.js ./
+
+ENV PORT=10000
+EXPOSE 10000
+
+CMD ["node","index.js"]
