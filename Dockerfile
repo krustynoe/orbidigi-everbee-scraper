@@ -1,16 +1,18 @@
-# ✅ Trae Chromium ya instalado
 FROM mcr.microsoft.com/playwright:v1.56.1-jammy
 
 WORKDIR /app
 
-# Cachea la instalación
+# Copiamos sólo package.json para cachear instalación
 COPY package.json ./
+# Si tienes package-lock.json lo puedes omitir; no es obligatorio
+# COPY package-lock.json ./
+
 RUN npm install --omit=dev
 
-# Copia tu código
+# Copiamos el código
 COPY index.js ./
 
-# Render asigna PORT=10000 a servicios Node
+# Render suele asignar PORT=10000 en Node, respetamos el env var
 ENV PORT=10000
 EXPOSE 10000
 
