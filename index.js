@@ -145,6 +145,35 @@ function parseTableRows(html, colMap){
   return out;
 }
 
+// Parser genérico para cualquier tabla que parezca Keywords (Keyword / Volume / Competition)
+function parseEverbeeKeywords(html){
+  const $ = cheerio.load(html);
+  const table = $('table').first();
+  if (!table.length) return [];
+
+  const headers = [];
+  table.find('thead tr').first().find('th,td').each((_, el)=>{
+    const t = $(el).text().trim().toLowerCase();
+    headers.push(t);
+  });
+  if (!headers.length) return [];
+
+  const idxKey  = headers.findIndex(h => /keyword|key ?word|search term|tag/.test(h));
+  const idxVol  = headers.findIndex(h => /volume|search|monthly/.test(h));
+  const idxComp = headers.findIndex(h => /competit|difficulty|comp/.test(h));
+
+  const rows=[];
+  table.find('tbody tr').each((_, tr)=>{
+    const tds = $(tr).find('td'); if (!tds.length) return;
+    const cols = tds.map((__, td)=>$(td).text().trim()).get();
+    const keyword = idxKey  >= 0 ? cols[idxKey]  : '';
+    const volume  = idxVol  >= 0 ? cols[idxVol]  : '';
+    const comp    = idxComp >= 0 ? cols[idxComp] : '';
+    if (keyword) rows.push({ keyword, volume, competition:comp, score:score(volume,comp) });
+  });
+  return rows;
+}
+
 /* ====== HEALTH & DIAG ====== */
 app.get('/healthz', (_req,res)=> res.json({ ok:true, service:'everbee-scraper', stealth:STEALTH_ON }));
 
@@ -174,6 +203,8 @@ app.get('/everbee/keyword-research', async (req,res)=>{
       const p = await context.newPage();
       await openAndIdle(p, `${EVERBEE}/keyword-research`);
 
+      // (Opcional: aquí podrías automatizar escribir q en la caja de búsqueda de EverBee)
+
       const cap = await captureJson(p, o =>
         o && typeof o==='object' && ('keyword' in o || 'term' in o),
         7000
@@ -187,10 +218,12 @@ app.get('/everbee/keyword-research', async (req,res)=>{
         if (keyword) rows.push({ keyword, volume, competition:comp, score:score(volume,comp) });
       }
 
+      // Fallbacks DOM
+      const html = await p.content();
       if (!rows.length){
-        const html = await p.content();
-        const dom  = parseTableRows(html, { keyword:0, volume:1, competition:2 });
-        rows = dom.map(r=>({...r,score:score(r.volume,r.competition)}));
+        let dom  = parseTableRows(html, { keyword:0, volume:1, competition:2 });
+        if (!dom.length) dom = parseEverbeeKeywords(html); // parser genérico
+        rows = dom.map(r=>({...r, score:score(r.volume,r.competition)}));
       }
 
       await p.close();
@@ -303,11 +336,19 @@ app.get('/everbee/my-shop', async (_req,res)=>{
 
       if (!Object.keys(stats).length){
         const html=await p.content(); const $=cheerio.load(html);
-        const body=$('body').text();
-        const match=(rx)=> (rx.exec(body)?.[1]||'').trim();
-        stats.sales   = stats.sales   || match(/Sales[^0-9]*([\d,\.]+)/i);
-        stats.revenue = stats.revenue || match(/Revenue[^0-9$]*(\$?[\d,\.]+)/i);
-        stats.listings= stats.listings|| match(/Listings[^0-9]*([\d,\.]+)/i);
+        const body=$('body').text().replace(/\s+/g,' ');
+
+        function grab(regex) {
+          const m = body.match(regex);
+          return m ? (m[1] || m[2] || '').trim() : '';
+        }
+
+        // Total Sales / Sales
+        stats.sales = stats.sales || grab(/(Total Sales|Sales)[^0-9]*([\d,\.]+)/i);
+        // Total Revenue / Revenue
+        stats.revenue = stats.revenue || grab(/(Total Revenue|Revenue)[^0-9$]*(\$?[\d,\.]+)/i);
+        // Listings / Active Listings
+        stats.listings = stats.listings || grab(/(Listings|Active Listings)[^0-9]*([\d,\.]+)/i);
       }
 
       await p.close();
