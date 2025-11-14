@@ -1,102 +1,102 @@
-// index.js — OrbiDigi EverBee Scraper (final version)
-// Express + Playwright + Cheerio + XHR capture + fallback DOM + Docker-ready
+// index.js — OrbiDigi EverBee Scraper (final)
+// Express + Playwright + Cheerio + DOM scraping (EverBee) + Docker-ready
 
 const express = require('express');
 const cheerio = require('cheerio');
 const { chromium } = require('playwright');
 
-const app = express();
+const app  = express();
 const port = process.env.PORT || 10000;
 
-/* ====== ENV ====== */
+/* ===== ENV ===== */
 const EVERBEE_COOKIES  = (process.env.EVERBEE_COOKIES || '').trim();
 const STEALTH_ON       = (process.env.STEALTH_ON || '1') !== '0';
 const MAX_RETRIES      = parseInt(process.env.MAX_RETRIES || '3', 10);
 const RECYCLE_AFTER    = parseInt(process.env.RECYCLE_AFTER || '6', 10);
 
-/* ====== BASE ====== */
+/* ===== BASE URLS ===== */
 const EVERBEE = 'https://app.everbee.io';
 const ETSY    = 'https://www.etsy.com';
 
-/* ====== RUNTIME ====== */
+/* ===== RUNTIME ===== */
 let browser = null, context = null, consecutiveErrors = 0;
 
-/* ====== UTILS ====== */
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-const rand  = (a,b)=> Math.floor(Math.random()*(b-a+1))+a;
-const jitter= ()=> STEALTH_ON ? sleep(rand(250,700)) : Promise.resolve();
-const toInt = v => (v==null) ? 0 : (typeof v==='number'? v|0 : (String(v).replace(/[^\d]/g,'')|0));
-const score = (vol, comp)=> toInt(vol) / (toInt(comp)+1);
-const dedupeBy = (arr, keyFn)=> {
+/* ===== UTILS ===== */
+const sleep  = ms => new Promise(r => setTimeout(r, ms));
+const rand   = (a,b)=> Math.floor(Math.random()*(b-a+1))+a;
+const jitter = ()=> STEALTH_ON ? sleep(rand(250,700)) : Promise.resolve();
+const toInt  = v => (v==null) ? 0 : (typeof v==='number'? v|0 : (String(v).replace(/[^\d]/g,'')|0));
+const score  = (vol, comp)=> toInt(vol) / (toInt(comp)+1);
+const dedupeBy = (arr, keyFn)=>{
   const seen = new Set();
-  return arr.filter(x=>{ const k=keyFn(x); if(seen.has(k)) return false; seen.add(k); return true;});
+  return arr.filter(x=>{ const k=keyFn(x); if(seen.has(k)) return false; seen.add(k); return true; });
 };
 function cookiesFromString(str){
   return str.split(';').map(s=>s.trim()).filter(Boolean).map(p=>{
     const i=p.indexOf('=');
     if (i<=0) return null;
-    return { name:p.slice(0,i).trim(), value:p.slice(i+1).trim(), path:'/', secure:true, httpOnly:false, sameSite:'None' };
+    return {
+      name: p.slice(0,i).trim(),
+      value: p.slice(i+1).trim(),
+      path: '/',
+      secure: true,
+      httpOnly: false,
+      sameSite: 'None'
+    };
   }).filter(Boolean);
 }
 
-/* ====== BROWSER MANAGEMENT ====== */
+/* ===== BROWSER MANAGEMENT ===== */
 async function recycle(reason='stale'){
   try{ if(context) await context.close().catch(()=>{}); }catch{}
   try{ if(browser) await browser.close().catch(()=>{}); }catch{}
-  browser=context=null; consecutiveErrors=0;
+  context = null; browser = null; consecutiveErrors = 0;
   console.warn('[recycle]', reason);
 }
-
 async function ensureBrowser(){
   if (browser && context) return;
   browser = await chromium.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-dev-shm-usage']
+    args: ['--no-sandbox','--disable-dev-shm-usage']
   });
-
   const ctxOpts = {
     baseURL: EVERBEE,
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
     locale: 'en-US',
     extraHTTPHeaders: { 'accept-language': 'en-US,en;q=0.9' }
   };
-
   context = await browser.newContext(ctxOpts);
 
   if (EVERBEE_COOKIES){
-    const parsed = cookiesFromString(EVERBEE_COOKIES);
+    const parsed  = cookiesFromString(EVERBEE_COOKIES);
     const targets = [
-      { domain: 'app.everbee.io' }, { domain: '.everbee.io' },
-      { domain: 'www.etsy.com' },   { domain: '.etsy.com' }
+      { domain:'app.everbee.io' }, { domain:'.everbee.io' },
+      { domain:'www.etsy.com'   }, { domain:'.etsy.com'    }
     ];
-    const all = [];
-    for (const c of parsed) for (const t of targets) all.push({...c, ...t});
-    try { await context.addCookies(all); } catch (e) {
-      console.error('addCookies:', e.message);
-    }
+    const all=[];
+    for (const c of parsed) for (const t of targets) all.push({ ...c, ...t });
+    try{ await context.addCookies(all); }catch(e){ console.error('addCookies:', e.message); }
   }
 }
-
 async function openAndIdle(page, url){
   await jitter();
   const resp = await page.goto(url, { waitUntil:'domcontentloaded', timeout:60000 });
-  await page.waitForLoadState('networkidle', { timeout:60000 }).catch(()=>{});
+  await page.waitForLoadState('networkidle',{timeout:60000}).catch(()=>{});
   await jitter();
   return resp;
 }
-
 async function withRetries(fn, label='task'){
   let last;
   for (let i=1;i<=MAX_RETRIES;i++){
-    try {
+    try{
       const r = await fn();
       consecutiveErrors = 0;
       return r;
-    } catch (e) {
+    }catch(e){
       last = e; consecutiveErrors++;
       console.warn(`[${label}] retry ${i}/${MAX_RETRIES}`, e.message||e);
       await sleep(rand(600,1400)*i);
-      if (consecutiveErrors >= RECYCLE_AFTER) {
+      if (consecutiveErrors>=RECYCLE_AFTER){
         await recycle(label);
         await ensureBrowser();
       }
@@ -105,274 +105,230 @@ async function withRetries(fn, label='task'){
   throw last;
 }
 
-/* ====== CAPTURE XHR ====== */
-function findArraysDeep(obj, pred, acc=[]){
-  if (!obj || typeof obj!=='object') return acc;
-  if (Array.isArray(obj) && obj.some(pred)) acc.push(obj);
-  for (const k of Object.keys(obj)) findArraysDeep(obj[k], pred, acc);
-  return acc;
-}
-
-async function captureJson(page, pred, ms=4000){
-  const bag=[];
-  const handler = async (r)=>{
-    try{
-      const ct = (r.headers()['content-type']||'').toLowerCase();
-      if (!ct.includes('application/json')) return;
-      const t = await r.text();
-      const j = JSON.parse(t);
-      const arrs = findArraysDeep(j, pred);
-      if (arrs.length) bag.push({ json:j, arrays:arrs });
-    }catch{}
-  };
-  page.on('response', handler);
-  await page.waitForTimeout(ms);
-  page.off('response', handler);
-  return bag;
-}
-
-/* ====== PARSERS ====== */
+/* ===== BASIC DOM PARSERS ===== */
 function parseTableRows(html, colMap){
   const $=cheerio.load(html), out=[];
   $('table tbody tr').each((_,tr)=>{
-    const td=$(tr).find('td'); if (!td.length) return;
+    const td=$(tr).find('td'); if(!td.length) return;
     const row={};
-    for (const [prop, idx] of Object.entries(colMap)){
-      row[prop]=(td[idx] ? $(td[idx]).text().trim() : '');
+    for (const [prop,idx] of Object.entries(colMap)){
+      row[prop] = td[idx] ? $(td[idx]).text().trim() : '';
     }
     out.push(row);
   });
   return out;
 }
-
-// Parser genérico para “tabla de keywords”
 function parseEverbeeKeywords(html){
-  const $ = cheerio.load(html);
+  const $=cheerio.load(html);
   const tables = $('table');
   let best = null;
 
-  tables.each((_, tbl)=>{
-    const table = $(tbl);
-    const hdrs = [];
-    table.find('thead tr').first().find('th,td').each((__, el)=>{
+  tables.each((_,t)=>{
+    const table = $(t);
+    const hdrs=[];
+    table.find('thead tr').first().find('th,td').each((__,el)=>{
       const t = $(el).text().trim().toLowerCase();
       hdrs.push(t);
     });
     if (!hdrs.length) return;
-
-    const hasKeyword = hdrs.some(h=>/keyword|key ?word|tag|phrase/.test(h));
-    if (!hasKeyword) return;
-
-    // elegimos la primera tabla que tenga cabecera de keyword
+    const hasKw = hdrs.some(h=>/keyword|key ?word|tag|phrase/.test(h));
+    if (!hasKw) return;
     if (!best) best = table;
   });
 
   const table = best || tables.first();
   if (!table || !table.length) return [];
 
-  const headers = [];
-  table.find('thead tr').first().find('th,td').each((_, el)=>{
-    const t = $(el).text().trim().toLowerCase();
-    headers.push(t);
-  });
-
+  const headers=[];
+  table.find('thead tr').first().find('th,td').each((_,el)=>headers.push($(el).text().trim().toLowerCase()));
   const idxKey  = headers.findIndex(h => /keyword|key ?word|tag|phrase/.test(h));
   const idxVol  = headers.findIndex(h => /volume|avg.*search|searches|monthly/.test(h));
   const idxComp = headers.findIndex(h => /competit|difficulty|comp/.test(h));
 
   const rows=[];
-  table.find('tbody tr').each((_, tr)=>{
-    const tds=$(tr).find('td'); if (!tds.length) return;
-    const cols = tds.map((__, td)=>$(td).text().trim()).get();
-    const keyword = idxKey  >= 0 ? cols[idxKey]  : '';
-    const volume  = idxVol  >= 0 ? cols[idxVol]  : '';
-    const comp    = idxComp >= 0 ? cols[idxComp] : '';
-    if (keyword) rows.push({ keyword, volume, competition:comp, score:score(volume,comp) });
+  table.find('tbody tr').each((_,tr)=>{
+    const td=$(tr).find('td'); if (!td.length) return;
+    const cols = td.map((__,el)=>$(el).text().trim()).get();
+    const kw  = idxKey  >=0 ? cols[idxKey]  : '';
+    const vol = idxVol  >=0 ? cols[idxVol]  : '';
+    const cmp = idxComp >=0 ? cols[idxComp] : '';
+    if (kw) rows.push({ keyword:kw, volume:vol, competition:cmp, score:score(vol,cmp) });
   });
   return rows;
 }
 
-/* ====== HEALTH & DIAG ====== */
-app.get('/healthz', (_req,res)=> res.json({ ok:true, service:'everbee-scraper', stealth:STEALTH_ON }));
-
-app.get('/diag/browser-check', async (_req,res)=>{
-  try {
-    const b = await chromium.launch({ headless:true, args:['--no-sandbox','--disable-dev-shm-usage'] });
-    const ctx = await b.newContext();
-    const p = await ctx.newPage();
-    await p.goto('https://example.com', {waitUntil:'domcontentloaded'});
+/* ===== HEALTH & DIAG ===== */
+app.get('/healthz', (_q,r)=>r.json({ ok:true, service:'everbee-scraper', stealth:STEALTH_ON }));
+app.get('/diag/browser-check', async (_q,r)=>{
+  try{
+    const b  = await chromium.launch({ headless:true, args:['--no-sandbox','--disable-dev-shm-usage'] });
+    const ctx= await b.newContext();
+    const p  = await ctx.newPage();
+    await p.goto('https://example.com',{waitUntil:'domcontentloaded'});
     const ua = await p.evaluate(()=>navigator.userAgent);
     await b.close();
-    res.json({ ok:true, userAgent: ua });
-  } catch(e) {
-    res.status(500).json({ ok:false, error:e.message });
+    r.json({ ok:true, userAgent:ua });
+  }catch(e){
+    r.status(500).json({ ok:false, error:e.message });
   }
 });
 
-/* ====== ENDPOINTS ====== */
-
-/* 1️⃣ Keyword Research */
+/* ===== 1) Keyword Research ===== */
+/**
+ * EverBee URL patrón:
+ *  app.everbee.io/keyword-research?keyword=planner
+ * usamos ?keyword=<q> y luego parseamos la tabla.
+ */
 app.get('/everbee/keyword-research', async (req,res)=>{
-  const q=(req.query.q||'').toString().trim();
-  const limit = Math.max(1, Math.min(200, parseInt(req.query.limit||'30',10)));
-  try {
+  const q     = (req.query.q||'').toString().trim();
+  const limit = Math.max(1,Math.min(200,parseInt(req.query.limit||'30',10)));
+  try{
     const out = await withRetries(async ()=>{
       await ensureBrowser();
       const p = await context.newPage();
-      // si EverBee usa query en la URL, puedes ajustar aquí:
-      await openAndIdle(p, `${EVERBEE}/keyword-research`);
-      // (si quieres, aquí podrías automatizar el input de q en la caja de búsqueda)
-
-      const cap = await captureJson(p, o =>
-        o && typeof o==='object' && ('keyword' in o || 'term' in o),
-        7000
-      );
-
-      let rows=[];
-      for (const h of cap) for (const arr of h.arrays) for (const o of arr){
-        const keyword=(o.keyword||o.term||'').toString().trim();
-        const volume =(o.volume||o.searches||o.avg_searches||'').toString().trim();
-        const comp   =(o.competition||o.keyword_competition||o.etsy_competition||'').toString().trim();
-        if (keyword) rows.push({ keyword, volume, competition:comp, score:score(volume,comp) });
-      }
+      const url = `${EVERBEE}/keyword-research?keyword=${encodeURIComponent(q || '')}`;
+      await openAndIdle(p, url);
+      await p.waitForTimeout(4000);
+      await p.waitForSelector('table tbody tr',{timeout:10000}).catch(()=>{});
 
       const html = await p.content();
+      await p.close();
+
+      let rows = parseEverbeeKeywords(html);
       if (!rows.length){
-        let dom = parseTableRows(html, { keyword:0, volume:1, competition:2 });
-        if (!dom.length) dom = parseEverbeeKeywords(html);
-        rows = dom.map(r=>({...r, score:score(r.volume,r.competition)}));
+        rows = parseTableRows(html,{keyword:0, volume:1, competition:2});
+        rows = rows.map(r=>({...r,score:score(r.volume,r.competition)}));
       }
 
-      await p.close();
-      rows = dedupeBy(rows, r=>r.keyword.toLowerCase())
-             .sort((a,b)=>b.score-a.score || toInt(b.volume)-toInt(a.volume))
-             .slice(0,limit);
+      rows = dedupeBy(rows,r=>r.keyword.toLowerCase())
+              .sort((a,b)=>b.score-a.score || toInt(b.volume)-toInt(a.volume))
+              .slice(0,limit);
+
       return { query:q, count:rows.length, results:rows };
     }, 'everbee-keyword-research');
     res.json(out);
-  } catch(e){ res.status(500).json({ error:e.message||String(e) }); }
+  }catch(e){ res.status(500).json({ error:e.message||String(e) }); }
 });
 
-/* 2️⃣ Product Analytics */
+/* ===== 2) Product Analytics ===== */
+/**
+ * URL patrón vista en tu captura:
+ *  app.everbee.io/product-analytics?search_term=coloring+book
+ */
 app.get('/everbee/product-analytics', async (req,res)=>{
-  const limit = Math.max(1, Math.min(200, parseInt(req.query.limit||'20',10)));
-  try {
+  const q     = (req.query.q||'').toString().trim();
+  const limit = Math.max(1,Math.min(200,parseInt(req.query.limit||'20',10)));
+  try{
     const out = await withRetries(async ()=>{
       await ensureBrowser();
       const p = await context.newPage();
-      await openAndIdle(p, `${EVERBEE}/product-analytics`);
+      const url = `${EVERBEE}/product-analytics?search_term=${encodeURIComponent(q || '')}`;
+      await openAndIdle(p, url);
+      await p.waitForTimeout(4000);
+      await p.waitForSelector('table tbody tr',{timeout:10000}).catch(()=>{});
 
-      const cap = await captureJson(p, o =>
-        o && typeof o==='object' &&
-        ('product' in o || 'title' in o) &&
-        ('revenue' in o || 'sales' in o || 'views' in o),
-        8000
-      );
-
-      let items=[];
-      for (const h of cap) for (const arr of h.arrays) for (const o of arr){
-        const product=(o.product||o.title||'').toString().trim();
-        const shop   =(o.shop_name||o.shop||'').toString().trim();
-        const price  =(o.price||'').toString().trim();
-        const sales  = toInt(o.sales||o.total_sales);
-        const revenue=(o.revenue||'').toString().trim();
-        const views  = toInt(o.views||o.total_views);
-        if (product) items.push({ product, shop, price, sales, revenue, views });
-      }
-
-      if (!items.length){
-        const html = await p.content();
-        const dom  = parseTableRows(html, { product:0, shop:1, price:2, sales:4, revenue:5 });
-        items = dom;
-      }
-
+      const html = await p.content();
       await p.close();
-      return { count:items.length, results:items.slice(0,limit) };
+
+      // Product | Shop Name | Price | Sales | Revenue | ...
+      let items = parseTableRows(html, {
+        product:0,
+        shop:1,
+        price:2,
+        sales:4,
+        revenue:5
+      });
+
+      items = items.map(r=>({
+        product: r.product,
+        shop   : r.shop,
+        price  : r.price,
+        sales  : r.sales,
+        revenue: r.revenue
+      })).slice(0,limit);
+
+      return { query:q, count:items.length, results:items };
     }, 'everbee-product-analytics');
     res.json(out);
-  } catch(e){ res.status(500).json({ error:e.message||String(e) }); }
+  }catch(e){ res.status(500).json({ error:e.message||String(e) }); }
 });
 
-/* 3️⃣ Shop Analyzer */
+/* ===== 3) Shop Analyzer ===== */
+/**
+ * Vista “Shop Analyzer” sin filtro (o filtrable con q si quieres).
+ */
 app.get('/everbee/shop-analyzer', async (req,res)=>{
-  const limit = Math.max(1, Math.min(200, parseInt(req.query.limit||'20',10)));
-  try {
+  const q     = (req.query.q||'').toString().trim();
+  const limit = Math.max(1,Math.min(200,parseInt(req.query.limit||'20',10)));
+  try{
     const out = await withRetries(async ()=>{
       await ensureBrowser();
       const p = await context.newPage();
-      await openAndIdle(p, `${EVERBEE}/shop-analyzer`);
+      const url = `${EVERBEE}/shop-analyzer`;
+      await openAndIdle(p, url);
+      await p.waitForTimeout(4000);
+      await p.waitForSelector('table tbody tr',{timeout:10000}).catch(()=>{});
 
-      const cap = await captureJson(p, o =>
-        o && typeof o==='object' && ('shop_name' in o || 'shop' in o),
-        8000
-      );
-
-      let shops=[];
-      for (const h of cap) for (const arr of h.arrays) for (const o of arr){
-        const name =(o.shop_name||o.shop||'').toString().trim();
-        const total_sales   = toInt(o.total_sales);
-        const total_revenue = (o.total_revenue||'').toString().trim();
-        const favorites     = toInt(o.favorites||o.total_favorites);
-        const reviews       = toInt(o.reviews||o.total_reviews);
-        const currency      = (o.currency||'').toString().trim();
-        const location      = (o.location||'').toString().trim();
-        const active_listings  = toInt(o.active_listings);
-        const digital_listings = toInt(o.digital_listings);
-        if (name) shops.push({ name, total_sales, total_revenue, favorites, reviews, currency, location, active_listings, digital_listings });
-      }
-
-      if (!shops.length){
-        const html = await p.content();
-        const dom  = parseTableRows(html, { name:0, total_sales:1, total_revenue:2, favorites:3, reviews:4, location:5 });
-        shops = dom;
-      }
-
+      const html = await p.content();
       await p.close();
-      return { count:shops.length, results:shops.slice(0,limit) };
+
+      // Shop Name | Total Sales | Total Revenue | ... | Total Favorites | Currency | Location | Active Listings | Digital Listings
+      let shops = parseTableRows(html, {
+        name:0,
+        total_sales:1,
+        total_revenue:2,
+        reviews:4,
+        favorites:7,
+        currency:8,
+        location:9,
+        active_listings:10,
+        digital_listings:11
+      });
+
+      shops = shops.slice(0,limit);
+      return { query:q, count:shops.length, results:shops };
     }, 'everbee-shop-analyzer');
     res.json(out);
-  } catch(e){ res.status(500).json({ error:e.message||String(e) }); }
+  }catch(e){ res.status(500).json({ error:e.message||String(e) }); }
 });
 
-/* 4️⃣ My Shop */
+/* ===== 4) My Shop (Overview tab) ===== */
+/**
+ * URL patrón:
+ *  app.everbee.io/?tabName=Overview
+ * Stats visibles: Sales, Revenue, Listings + panel de “Other stats”.
+ */
 app.get('/everbee/my-shop', async (_req,res)=>{
-  try {
+  try{
     const out = await withRetries(async ()=>{
       await ensureBrowser();
       const p = await context.newPage();
-      await openAndIdle(p, `${EVERBEE}/my-shop`);
+      const url = `${EVERBEE}/?tabName=Overview`;
+      await openAndIdle(p, url);
+      await p.waitForTimeout(3000);
 
-      const cap = await captureJson(p, o =>
-        o && typeof o==='object' && ('sales' in o || 'revenue' in o || 'listing_count' in o),
-        6000
-      );
-
-      const stats={};
-      for (const h of cap) for (const arr of h.arrays) for (const o of arr){
-        const keys=['sales','revenue','lifetime','avg_price','listing_count','review_rate'];
-        for (const k of keys){ if (o[k]!=null && stats[k]==null) stats[k]=o[k]; }
-      }
-
-      if (!Object.keys(stats).length){
-        const html=await p.content(); const $=cheerio.load(html);
-        const body=$('body').text().replace(/\s+/g,' ');
-
-        function grab(re) {
-          const m = body.match(re);
-          return m ? (m[1] || m[2] || '').trim() : '';
-        }
-
-        stats.sales    = stats.sales    || grab(/(Total Sales|Sales)[^0-9]*([\d,\.]+)/i);
-        stats.revenue  = stats.revenue  || grab(/(Total Revenue|Revenue)[^0-9$]*(\$?[\d,\.]+)/i);
-        stats.listings = stats.listings || grab(/(Listings|Active Listings)[^0-9]*([\d,\.]+)/i);
-      }
-
+      const html = await p.content();
       await p.close();
+
+      const $   = cheerio.load(html);
+      const txt = $('body').text().replace(/\s+/g,' ');
+
+      function grab(re){
+        const m = txt.match(re);
+        return m ? (m[1] || m[2] || '').trim() : '';
+      }
+
+      const stats = {
+        sales   : grab(/(Total Sales|Sales)[^0-9]*([\d,\.]+)/i),
+        revenue : grab(/(Total Revenue|Revenue)[^0-9$]*(\$?[\d,\.]+)/i),
+        listings: grab(/(Listings|Active Listings)[^0-9]*([\d,\.]+)/i)
+      };
+
       return { stats };
     }, 'everbee-my-shop');
     res.json(out);
-  } catch(e){ res.status(500).json({ error:e.message||String(e) }); }
+  }catch(e){ res.status(500).json({ error:e.message||String(e) }); }
 });
 
-/* ====== START ====== */
+/* ===== START ===== */
 app.listen(port, ()=> console.log(`[everbee] listening on :${port}`));
