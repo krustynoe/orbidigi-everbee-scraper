@@ -1,4 +1,4 @@
-// index.js — OrbiDigi EverBee Scraper (Puppeteer + login automático)
+// index.js — OrbiDigi EverBee Scraper (Express + Puppeteer)
 
 const express   = require('express');
 const cheerio   = require('cheerio');
@@ -13,7 +13,7 @@ const EVERBEE_EMAIL    = process.env.EVERBEE_EMAIL || '';
 const EVERBEE_PASSWORD = process.env.EVERBEE_PASSWORD || '';
 
 if (!EVERBEE_EMAIL || !EVERBEE_PASSWORD) {
-  console.warn('[everbee] ⚠️ Falta EVERBEE_EMAIL o EVERBEE_PASSWORD en el entorno');
+  console.warn('[everbee] ⚠️ Falta EVERBEE_EMAIL o EVERBEE_PASSWORD en las variables de entorno');
 }
 
 /* ========= PUPPETEER SINGLETON ========= */
@@ -21,10 +21,10 @@ if (!EVERBEE_EMAIL || !EVERBEE_PASSWORD) {
 let browser = null;
 let page    = null;
 let lastLoginTs = 0;
-const LOGIN_TTL_MS = 15 * 60 * 1000; // 15 min
+const LOGIN_TTL_MS = 15 * 60 * 1000; // 15 minutos
 
 async function getBrowser() {
-  if (browser && !browser.isClosed?.()) return browser;
+  if (browser && browser.isConnected()) return browser;
 
   browser = await puppeteer.launch({
     headless: 'new',
@@ -45,6 +45,11 @@ async function getPage() {
 
   page = await br.newPage();
   await page.setViewport({ width: 1280, height: 720 });
+
+  // Timeouts amplios para entorno Render
+  page.setDefaultNavigationTimeout(60000);
+  page.setDefaultTimeout(60000);
+
   return page;
 }
 
@@ -53,25 +58,33 @@ async function getPage() {
 async function ensureLoggedIn() {
   const p = await getPage();
 
-  // Si el login es reciente, reaprovechamos sesión
-  if (Date.now() - lastLoginTs < LOGIN_TTL_MS) return p;
+  // Reusar sesión si el login es reciente
+  if (Date.now() - lastLoginTs < LOGIN_TTL_MS) {
+    return p;
+  }
 
   console.log('[everbee] realizando login…');
 
-  await p.goto('https://app.everbee.io', { waitUntil: 'networkidle2' });
+  // Navegación inicial a EverBee
+  await p.goto('https://app.everbee.io', {
+    waitUntil: 'domcontentloaded',
+    timeout: 60000
+  });
 
-  // Si ya estamos dentro, no hace falta loguear
-  const url = p.url();
-  if (!/login|auth/i.test(url)) {
-    console.log('[everbee] ya logueado, url:', url);
+  const currentUrl = p.url();
+  console.log('[everbee] URL tras primer goto:', currentUrl);
+
+  // Si ya estamos dentro (sesión válida), no hacemos login
+  if (!/login|auth|signin/i.test(currentUrl)) {
+    console.log('[everbee] sesión ya activa, sin login adicional');
     lastLoginTs = Date.now();
     return p;
   }
 
-  // Espera inputs
-  await p.waitForSelector('input[name="email"]', { timeout: 15000 });
+  // Esperar a que aparezca el input de email
+  await p.waitForSelector('input[name="email"]', { timeout: 30000 });
 
-  // Quita readonly de email y password
+  // Quitar readonly de email y password
   await p.evaluate(() => {
     const emailInput    = document.querySelector('input[name="email"]');
     const passwordInput = document.querySelector('input[name="password"]');
@@ -79,29 +92,28 @@ async function ensureLoggedIn() {
     if (passwordInput) passwordInput.removeAttribute('readonly');
   });
 
-  // Rellena credenciales
+  // Rellenar email
   await p.click('input[name="email"]', { clickCount: 3 });
   await p.type('input[name="email"]', EVERBEE_EMAIL, { delay: 30 });
 
+  // Rellenar password
   await p.click('input[name="password"]', { clickCount: 3 });
   await p.type('input[name="password"]', EVERBEE_PASSWORD, { delay: 30 });
 
   // Enviar formulario con Enter (el botón puede estar disabled)
   await p.keyboard.press('Enter');
 
-  // Espera redirección y carga del dashboard
-  await p.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
-  await p.waitForTimeout(3000);
+  // Esperar unos segundos a que cargue el dashboard
+  await p.waitForTimeout(7000);
+
+  console.log('[everbee] login completado, URL actual:', p.url());
 
   lastLoginTs = Date.now();
-  console.log('[everbee] login OK, url actual:', p.url());
-
   return p;
 }
 
 /* ========= HELPERS DE SCRAPING ========= */
 
-// Devuelve HTML actual de la página (por si quieres procesarlo desde Make/GPT)
 async function snapshotHTML(p) {
   const html = await p.content();
   return html;
@@ -115,24 +127,26 @@ app.get('/healthz', (req, res) => {
 
 /**
  * GET /everbee/my-shop
- * Devuelve un resumen básico de la vista "My Shop" + HTML crudo.
+ * Devuelve resumen básico de "My Shop" + HTML completo.
  */
 app.get('/everbee/my-shop', async (req, res) => {
   try {
     const p = await ensureLoggedIn();
 
-    await p.goto('https://app.everbee.io/', { waitUntil: 'networkidle2' });
-    await p.waitForTimeout(2000);
+    await p.goto('https://app.everbee.io/', {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000
+    });
+    await p.waitForTimeout(3000);
 
     const html = await snapshotHTML(p);
     const $ = cheerio.load(html);
 
-    // Intento simple de sacar nombre de tienda y algunas métricas
     let shopName = '';
     let sales    = '';
     let rating   = '';
 
-    // Esto es aproximado; puedes refinarlo luego según la estructura real
+    // Intento simple de extraer nombre de tienda
     $('[class*="shop"], [class*="Shop"]').each((_, el) => {
       const text = $(el).text().trim();
       if (!shopName && text && text.length < 50) {
@@ -140,10 +154,9 @@ app.get('/everbee/my-shop', async (req, res) => {
       }
     });
 
-    // Estas cadenas son orientativas, las viste en el snapshot de Playwright
-    const statsBlock = $('body').text();
-    const salesMatch  = statsBlock.match(/(\d+)\s+Sales/i);
-    const ratingMatch = statsBlock.match(/(\d+(\.\d+)?)\s*\(\d+\)/);
+    const allText = $('body').text();
+    const salesMatch  = allText.match(/(\d+)\s+Sales/i);
+    const ratingMatch = allText.match(/(\d+(\.\d+)?)\s*\(\d+\)/);
 
     if (salesMatch)  sales  = salesMatch[1];
     if (ratingMatch) rating = ratingMatch[1];
@@ -159,24 +172,34 @@ app.get('/everbee/my-shop', async (req, res) => {
     });
   } catch (err) {
     console.error('[everbee] /everbee/my-shop error', err);
-    res.status(500).json({ ok: false, error: err.message || String(err) });
+    res.status(500).json({
+      ok: false,
+      error: err.message || String(err)
+    });
   }
 });
 
 /**
  * GET /everbee/products
- * Carga la vista de Product Analytics y devuelve HTML.
+ * Carga Product Analytics y devuelve HTML.
  */
 app.get('/everbee/products', async (req, res) => {
   try {
     const p = await ensureLoggedIn();
 
-    // según tu UI, esta ruta suele ser /product-analytics
-    await p.goto('https://app.everbee.io/product-analytics', { waitUntil: 'networkidle2' })
-      .catch(async () => {
-        // fallback: ir a root y hacer click textual
-        await p.goto('https://app.everbee.io/', { waitUntil: 'networkidle2' });
+    // Intento directo a ruta de Product Analytics
+    try {
+      await p.goto('https://app.everbee.io/product-analytics', {
+        waitUntil: 'domcontentloaded',
+        timeout: 60000
       });
+    } catch (e) {
+      console.warn('[everbee] /product-analytics directo falló, usando fallback root', e.message);
+      await p.goto('https://app.everbee.io/', {
+        waitUntil: 'domcontentloaded',
+        timeout: 60000
+      });
+    }
 
     await p.waitForTimeout(3000);
 
@@ -184,13 +207,16 @@ app.get('/everbee/products', async (req, res) => {
     res.json({ ok: true, html });
   } catch (err) {
     console.error('[everbee] /everbee/products error', err);
-    res.status(500).json({ ok: false, error: err.message || String(err) });
+    res.status(500).json({
+      ok: false,
+      error: err.message || String(err)
+    });
   }
 });
 
 /**
  * GET /everbee/keyword-research?q=planner
- * Abre Keyword Research, lanza una búsqueda (si q) y devuelve HTML.
+ * Abre Keyword Research, lanza búsqueda (si q) y devuelve HTML.
  */
 app.get('/everbee/keyword-research', async (req, res) => {
   const q = (req.query.q || '').toString();
@@ -198,16 +224,22 @@ app.get('/everbee/keyword-research', async (req, res) => {
   try {
     const p = await ensureLoggedIn();
 
-    await p.goto('https://app.everbee.io/keyword-research', { waitUntil: 'networkidle2' })
-      .catch(async () => {
-        // fallback: root + click
-        await p.goto('https://app.everbee.io/', { waitUntil: 'networkidle2' });
+    try {
+      await p.goto('https://app.everbee.io/keyword-research', {
+        waitUntil: 'domcontentloaded',
+        timeout: 60000
       });
+    } catch (e) {
+      console.warn('[everbee] /keyword-research directo falló, usando root', e.message);
+      await p.goto('https://app.everbee.io/', {
+        waitUntil: 'domcontentloaded',
+        timeout: 60000
+      });
+    }
 
     await p.waitForTimeout(2000);
 
     if (q) {
-      // busca un input de búsqueda razonable
       const searchSelectorCandidates = [
         'input[placeholder*="Search"]',
         'input[type="search"]',
@@ -228,6 +260,8 @@ app.get('/everbee/keyword-research', async (req, res) => {
         await p.type(selectorFound, q, { delay: 30 });
         await p.keyboard.press('Enter');
         await p.waitForTimeout(4000);
+      } else {
+        console.warn('[everbee] no se encontró input de búsqueda en Keyword Research');
       }
     }
 
@@ -235,7 +269,10 @@ app.get('/everbee/keyword-research', async (req, res) => {
     res.json({ ok: true, query: q || null, html });
   } catch (err) {
     console.error('[everbee] /everbee/keyword-research error', err);
-    res.status(500).json({ ok: false, error: err.message || String(err) });
+    res.status(500).json({
+      ok: false,
+      error: err.message || String(err)
+    });
   }
 });
 
