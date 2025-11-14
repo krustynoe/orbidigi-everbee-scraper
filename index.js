@@ -16,6 +16,10 @@ if (!EVERBEE_EMAIL || !EVERBEE_PASSWORD) {
   console.warn('[everbee] ⚠️ Falta EVERBEE_EMAIL o EVERBEE_PASSWORD en las variables de entorno');
 }
 
+/* ========= UTIL: sleep ========= */
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 /* ========= PUPPETEER SINGLETON ========= */
 
 let browser = null;
@@ -104,7 +108,7 @@ async function ensureLoggedIn() {
   await p.keyboard.press('Enter');
 
   // Esperar unos segundos a que cargue el dashboard
-  await p.waitForTimeout(7000);
+  await sleep(7000);
 
   console.log('[everbee] login completado, URL actual:', p.url());
 
@@ -137,7 +141,7 @@ app.get('/everbee/my-shop', async (req, res) => {
       waitUntil: 'domcontentloaded',
       timeout: 60000
     });
-    await p.waitForTimeout(3000);
+    await sleep(3000);
 
     const html = await snapshotHTML(p);
     const $ = cheerio.load(html);
@@ -201,7 +205,7 @@ app.get('/everbee/products', async (req, res) => {
       });
     }
 
-    await p.waitForTimeout(3000);
+    await sleep(3000);
 
     const html = await snapshotHTML(p);
     res.json({ ok: true, html });
@@ -237,7 +241,7 @@ app.get('/everbee/keyword-research', async (req, res) => {
       });
     }
 
-    await p.waitForTimeout(2000);
+    await sleep(2000);
 
     if (q) {
       const searchSelectorCandidates = [
@@ -259,7 +263,7 @@ app.get('/everbee/keyword-research', async (req, res) => {
         await p.click(selectorFound, { clickCount: 3 });
         await p.type(selectorFound, q, { delay: 30 });
         await p.keyboard.press('Enter');
-        await p.waitForTimeout(4000);
+        await sleep(4000);
       } else {
         console.warn('[everbee] no se encontró input de búsqueda en Keyword Research');
       }
