@@ -1,86 +1,78 @@
-// index.js — OrbiDigi EverBee Scraper (DOM-direct, final)
-// Express + Playwright (Chromium) + scraping directo del DOM EverBee
+// index.js — OrbiDigi EverBee Scraper (DOM-direct, cookies via header) — FINAL
 
 const express = require('express');
+const cheerio = require('cheerio');
 const { chromium } = require('playwright');
 
-const app  = express();
+const app = express();
 const port = process.env.PORT || 10000;
 
-/* ===== ENV ===== */
-const EVERBEE_COOKIES  = (process.env.EVERBEE_COOKIES || '').trim();
+/* ====== ENV ====== */
+const EVERBEE_COOKIES  = (process.env.EVERBEE_COOKIES || '').trim(); // Debe ser: "name=value; name2=value2; ..."
 const STEALTH_ON       = (process.env.STEALTH_ON || '1') !== '0';
-const MAX_RETRIES      = parseInt(process.env.MAX_RETRIES || '3', 10);
-const RECYCLE_AFTER    = parseInt(process.env.RECYCLE_AFTER || '6', 10);
-
-/* ===== CONSTANTES ===== */
-const EVERBEE = 'https://app.everbee.io';
+const MAX_RETRIES      = parseInt(process.env.RECOVERY_MAX_RETRIES || process.env.MAX_RETRIES || '3', 10);
+const EVERBEE_BASE     = 'https://app.everbee.io';
 
 let browser = null;
 let context = null;
 let consecutiveErrors = 0;
 
-/* ===== UTILS ===== */
-const sleep  = ms => new Promise(r => setTimeout(r, ms));
-const rand   = (a,b)=> Math.floor(Math.random()*(b-a+1))+a;
+/* ====== UTILS ====== */
+const sleep  = ms => new Promise(r=>setTimeout(r,ms));
+const rand   = (a,b)=>Math.floor(Math.random()*(b-a+1))+a;
 const jitter = ()=> STEALTH_ON ? sleep(rand(250,700)) : Promise.resolve();
-const toInt  = v => (v==null) ? 0 : (typeof v==='number'? v|0 : (String(v).replace(/[^\d]/g,'')|0));
-const score  = (vol, comp)=> toInt(vol) / (toInt(comp)+1);
 
-function cookiesFromString(str){
-  return str.split(';')
-    .map(s=>s.trim())
-    .filter(Boolean)
-    .map(p=>{
-      const i=p.indexOf('=');
-      if (i<=0) return null;
-      return {
-        name: p.slice(0,i).trim(),
-        value: p.slice(i+1).trim(),
-        path: '/',
-        secure: true,
-        httpOnly: false,
-        sameSite: 'None',
-        domain: '.everbee.io'
-      };
-    }).filter(Boolean);
-}
+/* Suma de señales: más volumen y menos competencia => más score */
+const toInt = v => {
+  if (v == null) return 0;
+  if (typeof v === 'number') return Math.floor(v);
+  if (typeof v === 'string') {
+    const m = v.replace(/,/g,'').match(/-?\d+(\.\d+)?/);
+    return m ? parseFloat(m[0]) : 0;
+  }
+  return 0;
+};
+const score = (volume, comp)=> {
+  const v = toInt(volume);
+  const c = toInt(comp);
+  return v > 0 ? v / (c + 1) : 0;
+};
 
-/* ===== BROWSER ===== */
-async function recycle(reason='stale'){
-  try{ if(context) await context.close().catch(()=>{}); }catch{}
-  try{ if(browser) await browser.close().catch(()=>{}); }catch{}
-  browser = null;
-  context = null;
+/* ====== BROWSER / CONTEXT ====== */
+async function recycleContext(reason='recycle'){
+  try{ if (context) await context.close(); }catch{}
+  try{ if (browser) await browser.close(); }catch{}
+  browser  = null;
+  context  = null;
   consecutiveErrors = 0;
   console.warn('[recycle]', reason);
 }
 
-async function ensureBrowser(){
+async function ensureContext(){
   if (browser && context) return;
+
   browser = await chromium.launch({
     headless:true,
     args:['--no-sandbox','--disable-dev-shm-usage']
   });
-  context = await browser.newContext({
-    baseURL: EVERBEE,
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-    locale: 'en-US',
-    extraHTTPHeaders: { 'accept-language':'en-US,en;q=0.9' }
-  });
 
-  if (EVERBEE_COOKIES){
-    const parsed = cookiesFromString(EVERBEE_COOKIES);
-    if (parsed.length){
-      try{ await context.addCookies(parsed); }catch(e){ console.error('addCookies:', e.message); }
-    }
+  const headers = { 'accept-language':'en-US,en;q=0.9' };
+  // 👉 metemos aquí la cabecera Cookie tal cual viene de EVERBEE_COOKIES
+  if (EVERBEE_COOKIES) {
+    headers['cookie'] = EVERBEE_COOKIES;
   }
+
+  context = await browser.newContext({
+    baseURL: EVERBEE_BASE,
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+    extraHTTPHeaders: headers
+  });
 }
 
 async function openAndIdle(page, url){
   await jitter();
   const resp = await page.goto(url, { waitUntil:'domcontentloaded', timeout:60000 });
-  await page.waitForLoadState('networkidle',{timeout:60000}).catch(()=>{});
+  await page.waitForLoadState('networkidle', { timeout:60000 }).catch(()=>{});
   await jitter();
   return resp;
 }
@@ -95,215 +87,203 @@ async function withRetries(fn, label='task'){
     }catch(e){
       last = e;
       consecutiveErrors++;
-      console.warn(`[${label}] retry ${i}/${MAX_RETRIES}`, e.message||e);
-      await sleep(rand(600,1400)*i);
-      if (consecutiveErrors>=RECYCLE_AFTER){
-        await recycle(label);
-        await ensureBrowser();
+      console.warn(`[${label}] retry ${i}/${MAX_RETRIES}`, e.message || e);
+      await sleep(500*i);
+      if (consecutiveErrors >= 3){
+        await recycleContext(`too many errors in ${label}`);
+        await ensureContext();
       }
     }
   }
   throw last;
 }
 
-/* ===== HEALTH & DIAG ===== */
-app.get('/healthz', (_req,res)=> res.json({ ok:true, service:'everbee-scraper', stealth:STEALTH_ON }));
+/* ====== HEALTH / DEBUG ====== */
+app.get('/healthz', (_req,res)=>res.json({ok:true, service:'everbee-scraper', stealth:STEALTH_ON}));
 
 app.get('/diag/browser-check', async (_req,res)=>{
   try{
     const b  = await chromium.launch({ headless:true, args:['--no-sandbox','--disable-dev-shm-usage'] });
     const ctx= await b.newContext();
     const p  = await ctx.newPage();
-    await p.goto('https://example.com',{ waitUntil:'domcontentloaded' });
+    await p.goto('https://example.com', {waitUntil:'domcontentloaded'});
     const ua = await p.evaluate(()=>navigator.userAgent);
     await b.close();
-    res.json({ ok:true, userAgent:ua });
+    res.json({ok:true, userAgent:ua});
   }catch(e){
-    res.status(500).json({ ok:false, error:e.message });
+    res.status(500).json({ok:false, error:e.message});
   }
 });
 
-/* ===== 1) KEYWORD RESEARCH ===== */
+/* ====== HELPERS DOM ====== */
+
+/** Abre una URL relativa dentro de EverBee con contexto ya autenticado */
+async function openEverbee(path){
+  await ensureContext();
+  const page = await context.newPage();
+  await openAndIdle(page, path.startsWith('http') ? path : `${EVERBEE_BASE}${path}`);
+  return page;
+}
+
+/* ====== 1) KEYWORD RESEARCH ====== */
 /**
- * Vista: app.everbee.io/keyword-research?keyword=planner
- * Columnas: Keyword | Volume | Competition | Keyword Score
+ * URL: /keyword-research?keyword=planner
+ * Columnas: Keyword | Volume | Competition | Score
  */
 app.get('/everbee/keyword-research', async (req,res)=>{
-  const q     = (req.query.q||'').toString().trim();
-  const limit = Math.max(1, Math.min(200, parseInt(req.query.limit||'30',10)));
+  const q     = (req.query.q || '').toString().trim();
+  const limit = Math.max(1, Math.min(200, parseInt(req.query.limit || '30', 10)));
 
   try{
-    const out = await withRetries(async ()=>{
-      await ensureBrowser();
-      const p = await context.newPage();
-      const url = `${EVERBEE}/keyword-research?keyword=${encodeURIComponent(q || '')}`;
-      await openAndIdle(p, url);
-      await p.waitForSelector('table tbody tr',{timeout:15000}).catch(()=>{});
-
-      const rows = await p.$$eval('table tbody tr', trs => trs.map(tr=>{
-        const tds = Array.from(tr.querySelectorAll('td')).map(td=>td.innerText.trim());
+    const data = await withRetries(async ()=>{
+      const page = await openEverbee(`/keyword-research?keyword=${encodeURIComponent(q)}`);
+      await page.waitForSelector('table tbody tr', { timeout: 15000 }).catch(()=>{});
+      const rows = await page.$$eval('table tbody tr', trs => trs.map(tr => {
+        const tds = Array.from(tr.querySelectorAll('td')).map(td => td.innerText.trim());
         if (!tds.length) return null;
         return {
-          keyword    : tds[0] || '',
-          volume     : tds[1] || '',
-          competition: tds[2] || '',
-          keywordScore: tds[3] || ''
+          keyword: tds[0] || '',
+          volume:  tds[1] || '',
+          competition: tds[2] || ''
         };
       }).filter(Boolean));
+      await page.close();
+      return rows;
+    }, 'keywords');
 
-      await p.close();
+    let results = data.map(r => ({
+      keyword: r.keyword,
+      volume: r.volume,
+      competition: r.competition,
+      score: score(r.volume, r.competition)
+    }));
 
-      let results = rows.map(r=>({
-        keyword    : r.keyword,
-        volume     : r.volume,
-        competition: r.competition,
-        score      : score(r.volume, r.competition)
-      }));
+    // dedupe por keyword
+    const seen = new Set();
+    results = results.filter(r=>{
+      const k=(r.keyword||'').toLowerCase();
+      if(!k || seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
 
-      // dedupe
-      const seen = new Set();
-      results = results.filter(r=>{
-        const k = (r.keyword||'').toLowerCase();
-        if (!k || seen.has(k)) return false;
-        seen.add(k);
-        return true;
-      });
+    results.sort((a,b)=> b.score - a.score || toInt(b.volume) - toInt(a.volume));
+    results = results.slice(0, limit);
 
-      results.sort((a,b)=> b.score - a.score || toInt(b.volume) - toInt(a.volume));
-      results = results.slice(0, limit);
-
-      return { query:q, count:results.length, results };
-    }, 'everbee-keyword-research');
-
-    res.json(out);
+    res.json({ query:q, count: results.length, results });
   }catch(e){
-    res.status(500).json({ error:e.message || String(e) });
+    console.error('keywords error:', e);
+    res.status(500).json({error: e.message || String(e)});
   }
 });
 
-/* ===== 2) PRODUCT ANALYTICS ===== */
+/* ====== 2) PRODUCT ANALYTICS ====== */
 /**
- * Vista: app.everbee.io/product-analytics?search_term=coloring+book
+ * URL: /product-analytics?search_term=coloring+book
  * Columnas: Product | Shop Name | Price | Sales | Revenue
  */
 app.get('/everbee/product-analytics', async (req,res)=>{
-  const q     = (req.query.q||'').toString().trim();
-  const limit = Math.max(1, Math.min(200, parseInt(req.query.limit||'20',10)));
+  const q     = (req.query.q || '').toString().trim();
+  const limit = Math.max(1, Math.min(200, parseInt(req.query.limit || '20', 10)));
 
   try{
-    const out = await withRetries(async ()=>{
-      await ensureBrowser();
-      const p = await context.newPage();
-      const url = `${EVERBEE}/product-analytics?search_term=${encodeURIComponent(q || '')}`;
-      await openAndIdle(p, url);
-      await p.waitForSelector('table tbody tr',{timeout:15000}).catch(()=>{});
-
-      const rows = await p.$$eval('table tbody tr', trs => trs.map(tr=>{
-        const tds = Array.from(tr.querySelectorAll('td')).map(td=>td.innerText.trim());
+    const data = await withRetries(async ()=>{
+      const page = await openEverbee(`/product-analytics?search_term=${encodeURIComponent(q)}`);
+      await page.waitForSelector('table tbody tr', { timeout: 15000 }).catch(()=>{});
+      const rows = await page.$$eval('table tbody tr', trs => trs.map(tr => {
+        const tds = Array.from(tr.querySelectorAll('td')).map(td => td.innerText.trim());
         if (!tds.length) return null;
         return {
-          product:   tds[0] || '',
-          shopName:  tds[1] || '',
-          price:     tds[2] || '',
-          sales:     tds[4] || '',
-          revenue:   tds[5] || ''
+          product : tds[0] || '',
+          shop    : tds[1] || '',
+          price   : tds[2] || '',
+          sales   : tds[4] || '',
+          revenue : tds[5] || ''
         };
       }).filter(Boolean));
+      await page.close();
+      return rows;
+    }, 'top-products');
 
-      await p.close();
-
-      const items = rows.slice(0, limit);
-      return { query:q, count:items.length, results:items };
-    }, 'everbee-product-analytics');
-
-    res.json(out);
+    const results = data.slice(0, limit);
+    res.json({ query:q, count: results.length, results });
   }catch(e){
-    res.status(500).json({ error:e.message || String(e) });
+    console.error('top-products error:', e);
+    res.status(500).json({error:e.message || String(e)});
   }
 });
 
-/* ===== 3) SHOP ANALYZER ===== */
+/* ====== 3) SHOP ANALYZER ====== */
 /**
- * Vista: app.everbee.io/shop-analyzer
- * Columnas (según captura):
- * Shop Name | Total Sales | Total Revenue | Mo. Sales | Mo. Revenue | Shop Age | Reviews | Total Favorites | Currency | Location | Active Listings | Digital Listings
+ * URL: /shop-analyzer
+ * Columnas: Shop Name | Total Sales | Total Revenue | Mo. Sales | Mo. Revenue | Shop Age | Reviews | Total Favorites | Currency | Location | Active Listings | Digital Listings
  */
 app.get('/everbee/shop-analyzer', async (req,res)=>{
-  const limit = Math.max(1, Math.min(200, parseInt(req.query.limit||'20',10)));
+  const limit = Math.max(1, Math.min(200, parseInt(req.query.limit || '20', 10)));
 
   try{
-    const out = await withRetries(async ()=>{
-      await ensureBrowser();
-      const p = await context.newPage();
-      const url = `${EVERBEE}/shop-analyzer`;
-      await openAndIdle(p, url);
-      await p.waitForSelector('table tbody tr',{timeout:15000}).catch(()=>{});
-
-      const rows = await p.$$eval('table tbody tr', trs => trs.map(tr=>{
+    const data = await withRetries(async ()=>{
+      const page = await openEverbee('/shop-analyzer');
+      await page.waitForSelector('table tbody tr', { timeout: 15000 }).catch(()=>{});
+      const rows = await page.$$eval('table tbody tr', trs => trs.map(tr=>{
         const tds = Array.from(tr.querySelectorAll('td')).map(td=>td.innerText.trim());
         if (!tds.length) return null;
         return {
-          shopName      : tds[0] || '',
-          totalSales    : tds[1] || '',
-          totalRevenue  : tds[2] || '',
-          moSales       : tds[3] || '',
-          moRevenue     : tds[4] || '',
-          shopAge       : tds[5] || '',
-          reviews       : tds[6] || '',
-          totalFavorites: tds[7] || '',
-          currency      : tds[8] || '',
-          location      : tds[9] || '',
-          activeListings: tds[10]|| '',
-          digitalListings:tds[11]|| ''
+          shopName       : tds[0] || '',
+          totalSales     : tds[1] || '',
+          totalRevenue   : tds[2] || '',
+          moSales        : tds[3] || '',
+          moRevenue      : tds[4] || '',
+          shopAge        : tds[5] || '',
+          reviews        : tds[6] || '',
+          totalFavorites : tds[7] || '',
+          currency       : tds[8] || '',
+          location       : tds[9] || '',
+          activeListings : tds[10]|| '',
+          digitalListings: tds[11]|| ''
         };
       }).filter(Boolean));
+      await page.close();
+      return rows;
+    }, 'shop-analyzer');
 
-      await p.close();
-
-      const shops = rows.slice(0, limit);
-      return { count:shops.length, results:shops };
-    }, 'everbee-shop-analyzer');
-
-    res.json(out);
+    const results = data.slice(0,limit);
+    res.json({ count: results.length, results });
   }catch(e){
-    res.status(500).json({ error:e.message || String(e) });
+    console.error('shop-analyzer error:', e);
+    res.status(500).json({error:e.message || String(e)});
   }
 });
 
-/* ===== 4) MY SHOP (OVERVIEW) ===== */
+/* ====== 4) MY SHOP (Overview) ====== */
 /**
- * Vista: app.everbee.io/?tabName=Overview
- * Cards de stats: Sales, Revenue, Listings, etc.
+ * URL: /?tabName=Overview
+ * Stats: Sales, Revenue, Listings, etc. en cards de la vista Overview.
  */
 app.get('/everbee/my-shop', async (_req,res)=>{
   try{
-    const out = await withRetries(async ()=>{
-      await ensureBrowser();
-      const p   = await context.newPage();
-      const url = `${EVERBEE}/?tabName=Overview`;
-      await openAndIdle(p, url);
-      await p.waitForTimeout(3000);
+    const stats = await withRetries(async ()=>{
+      const page = await openEverbee('/?tabName=Overview');
+      await page.waitForTimeout(3000);
+      const text = await page.evaluate(()=>document.body.innerText.replace(/\s+/g,' '));
+      await page.close();
 
-      const stats = await p.evaluate(()=>{
-        const text = document.body.innerText.replace(/\s+/g,' ');
-        const grab = (re) => {
-          const m = text.match(re);
-          return m ? (m[1] || m[2] || '').trim() : '';
-        };
-        return {
-          sales   : grab(/(Total Sales|Sales)[^0-9]*([\d,\.]+)/i),
-          revenue : grab(/(Total Revenue|Revenue)[^0-9$]*(\$?[\d,\.]+)/i),
-          listings: grab(/(Listings|Active Listings)[^0-9]*([\d,\.]+)/i)
-        };
-      });
+      const grab = (re) => {
+        const m = text.match(re);
+        return m ? (m[1] || m[2] || '').trim() : '';
+      };
 
-      await p.close();
-      return { stats };
-    }, 'everbee-my-shop');
+      return {
+        sales   : grab(/(Total Sales|Sales)\s*:?[\s]*([\d,\.]+)/i),
+        revenue : grab(/(Total Revenue|Revenue)\s*:?[\s]*([\d\.,]+)/i),
+        listings: grab(/(Active Listings|Listings)\s*:?[\s]*([\d,\.]+)/i)
+      };
+    }, 'my-shop');
 
-    res.json(out);
+    res.json({ stats: stats || {} });
   }catch(e){
-    res.status(500).json({ error:e.message || String(e) });
+    console.error('my-shop error:', e);
+    res.status(500).json({error:e.message || String(e)});
   }
 });
 
