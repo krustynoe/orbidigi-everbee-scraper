@@ -67,7 +67,7 @@ async function ensureBrowser(){
     const parsed = cookiesFromString(EVERBEE_COOKIES);
     const targets = [
       { domain: 'app.everbee.io' }, { domain: '.everbee.io' },
-      { domain: 'www.etsy.com' }, { domain: '.etsy.com' }
+      { domain: 'www.etsy.com' },   { domain: '.etsy.com' }
     ];
     const all = [];
     for (const c of parsed) for (const t of targets) all.push({...c, ...t});
@@ -145,26 +145,44 @@ function parseTableRows(html, colMap){
   return out;
 }
 
-// Parser genérico para cualquier tabla que parezca Keywords (Keyword / Volume / Competition)
+// Parser genérico para “tabla de keywords”
 function parseEverbeeKeywords(html){
   const $ = cheerio.load(html);
-  const table = $('table').first();
-  if (!table.length) return [];
+  const tables = $('table');
+  let best = null;
+
+  tables.each((_, tbl)=>{
+    const table = $(tbl);
+    const hdrs = [];
+    table.find('thead tr').first().find('th,td').each((__, el)=>{
+      const t = $(el).text().trim().toLowerCase();
+      hdrs.push(t);
+    });
+    if (!hdrs.length) return;
+
+    const hasKeyword = hdrs.some(h=>/keyword|key ?word|tag|phrase/.test(h));
+    if (!hasKeyword) return;
+
+    // elegimos la primera tabla que tenga cabecera de keyword
+    if (!best) best = table;
+  });
+
+  const table = best || tables.first();
+  if (!table || !table.length) return [];
 
   const headers = [];
   table.find('thead tr').first().find('th,td').each((_, el)=>{
     const t = $(el).text().trim().toLowerCase();
     headers.push(t);
   });
-  if (!headers.length) return [];
 
-  const idxKey  = headers.findIndex(h => /keyword|key ?word|search term|tag/.test(h));
-  const idxVol  = headers.findIndex(h => /volume|search|monthly/.test(h));
+  const idxKey  = headers.findIndex(h => /keyword|key ?word|tag|phrase/.test(h));
+  const idxVol  = headers.findIndex(h => /volume|avg.*search|searches|monthly/.test(h));
   const idxComp = headers.findIndex(h => /competit|difficulty|comp/.test(h));
 
   const rows=[];
   table.find('tbody tr').each((_, tr)=>{
-    const tds = $(tr).find('td'); if (!tds.length) return;
+    const tds=$(tr).find('td'); if (!tds.length) return;
     const cols = tds.map((__, td)=>$(td).text().trim()).get();
     const keyword = idxKey  >= 0 ? cols[idxKey]  : '';
     const volume  = idxVol  >= 0 ? cols[idxVol]  : '';
@@ -201,9 +219,9 @@ app.get('/everbee/keyword-research', async (req,res)=>{
     const out = await withRetries(async ()=>{
       await ensureBrowser();
       const p = await context.newPage();
+      // si EverBee usa query en la URL, puedes ajustar aquí:
       await openAndIdle(p, `${EVERBEE}/keyword-research`);
-
-      // (Opcional: aquí podrías automatizar escribir q en la caja de búsqueda de EverBee)
+      // (si quieres, aquí podrías automatizar el input de q en la caja de búsqueda)
 
       const cap = await captureJson(p, o =>
         o && typeof o==='object' && ('keyword' in o || 'term' in o),
@@ -218,16 +236,17 @@ app.get('/everbee/keyword-research', async (req,res)=>{
         if (keyword) rows.push({ keyword, volume, competition:comp, score:score(volume,comp) });
       }
 
-      // Fallbacks DOM
       const html = await p.content();
       if (!rows.length){
-        let dom  = parseTableRows(html, { keyword:0, volume:1, competition:2 });
-        if (!dom.length) dom = parseEverbeeKeywords(html); // parser genérico
+        let dom = parseTableRows(html, { keyword:0, volume:1, competition:2 });
+        if (!dom.length) dom = parseEverbeeKeywords(html);
         rows = dom.map(r=>({...r, score:score(r.volume,r.competition)}));
       }
 
       await p.close();
-      rows = dedupeBy(rows, r=>r.keyword.toLowerCase()).sort((a,b)=>b.score-a.score).slice(0,limit);
+      rows = dedupeBy(rows, r=>r.keyword.toLowerCase())
+             .sort((a,b)=>b.score-a.score || toInt(b.volume)-toInt(a.volume))
+             .slice(0,limit);
       return { query:q, count:rows.length, results:rows };
     }, 'everbee-keyword-research');
     res.json(out);
@@ -338,16 +357,13 @@ app.get('/everbee/my-shop', async (_req,res)=>{
         const html=await p.content(); const $=cheerio.load(html);
         const body=$('body').text().replace(/\s+/g,' ');
 
-        function grab(regex) {
-          const m = body.match(regex);
+        function grab(re) {
+          const m = body.match(re);
           return m ? (m[1] || m[2] || '').trim() : '';
         }
 
-        // Total Sales / Sales
-        stats.sales = stats.sales || grab(/(Total Sales|Sales)[^0-9]*([\d,\.]+)/i);
-        // Total Revenue / Revenue
-        stats.revenue = stats.revenue || grab(/(Total Revenue|Revenue)[^0-9$]*(\$?[\d,\.]+)/i);
-        // Listings / Active Listings
+        stats.sales    = stats.sales    || grab(/(Total Sales|Sales)[^0-9]*([\d,\.]+)/i);
+        stats.revenue  = stats.revenue  || grab(/(Total Revenue|Revenue)[^0-9$]*(\$?[\d,\.]+)/i);
         stats.listings = stats.listings || grab(/(Listings|Active Listings)[^0-9]*([\d,\.]+)/i);
       }
 
