@@ -1,15 +1,17 @@
 {
   "name": "orbidigi-everbee-scraper",
   "version": "1.0.0",
+  "description": "Backend Puppeteer para login automático y scraping de EverBee",
   "type": "commonjs",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "NODE_ENV=development node index.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
     "cheerio": "^1.0.0",
-    "playwright": "^1.56.1"
+    "express": "^4.19.2",
+    "puppeteer": "^22.0.0"
   }
 }
 

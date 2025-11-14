@@ -1,52 +1,51 @@
-# Usa una imagen oficial de Node como base
+# Imagen base ligera de Node 20
 FROM node:20-slim
 
-# Instala dependencias necesarias para Chromium
+# Variables para no tener preguntas en apt
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Dependencias del sistema necesarias para Chromium/Puppeteer
 RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
     ca-certificates \
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
+    libc6 \
+    libcairo2 \
     libcups2 \
     libdbus-1-3 \
     libdrm2 \
+    libexpat1 \
     libgbm1 \
+    libglib2.0-0 \
     libgtk-3-0 \
-    libnspr4 \
     libnss3 \
-    libx11-xcb1 \
+    libpango-1.0-0 \
+    libx11-6 \
+    libxcb1 \
     libxcomposite1 \
     libxdamage1 \
+    libxext6 \
     libxfixes3 \
     libxrandr2 \
-    libxss1 \
-    libxtst6 \
-    xdg-utils \
-    --no-install-recommends
+    wget \
+  && rm -rf /var/lib/apt/lists/*
 
-# Añade el repositorio oficial de Chromium y su clave (opcional)
-RUN apt-get install -y chromium && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-# Establece variables de entorno para Puppeteer
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
-
-# Crea y usa un directorio de trabajo
+# Carpeta de trabajo
 WORKDIR /usr/src/app
 
-# Copia los archivos package.json y package-lock.json
+# Copia package.json y package-lock (si existe)
 COPY package*.json ./
 
-# Instala las dependencias de la aplicación
-RUN npm install
+# Instala dependencias (incluye descarga de Chromium de Puppeteer)
+RUN npm install --omit=dev
 
-# Copia el resto del código de la aplicación
+# Copia el resto del código
 COPY . .
 
-# Expone el puerto en el que corre la app
-EXPOSE 3000
+# Puerto que usará la app (Render asigna PORT, pero dejamos por defecto 10000)
+EXPOSE 10000
 
-# Comando por defecto para ejecutar la app
+# Comando de arranque
 CMD ["node", "index.js"]
